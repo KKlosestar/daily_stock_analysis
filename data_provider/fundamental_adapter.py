@@ -312,15 +312,18 @@ def _financial_abstract_row(df: pd.DataFrame) -> Optional[pd.Series]:
         return None
     period = max(periods, key=str)
     metrics = df.drop_duplicates(subset=["指标"]).set_index("指标")[period]
-    # Exact aliases keep growth percentages separate from absolute amounts.
+    # Include AkShare's unit-bearing labels; exact aliases keep percentages
+    # separate from amounts and preserve qualifiers such as weighted ROE.
     aliases = {
-        "营业总收入": ["营业总收入", "营业收入"],
-        "归母净利润": ["归母净利润", "归属于母公司股东的净利润"],
-        "经营活动产生的现金流量净额": ["经营活动产生的现金流量净额"],
-        "营业收入同比": ["营业总收入同比增长率", "营业收入同比增长率"],
-        "净利润同比": ["净利润同比增长率", "归母净利润同比增长率"],
-        "净资产收益率": ["净资产收益率", "净资产收益率(加权)"],
-        "毛利率": ["销售毛利率", "毛利率"],
+        "营业总收入": ["营业总收入", "营业收入", "营业总收入(元)"],
+        "归母净利润": ["归母净利润", "归属于母公司股东的净利润", "归属净利润(元)"],
+        "经营活动产生的现金流量净额": [
+            "经营活动产生的现金流量净额", "经营活动产生的现金流量净额(元)", "经营现金流量净额(元)",
+        ],
+        "营业收入同比": ["营业总收入同比增长率", "营业收入同比增长率", "营业总收入同比增长(%)"],
+        "净利润同比": ["净利润同比增长率", "归母净利润同比增长率", "归属净利润同比增长(%)"],
+        "净资产收益率": ["净资产收益率", "净资产收益率(加权)", "净资产收益率(%)", "净资产收益率(加权)(%)"],
+        "毛利率": ["销售毛利率", "毛利率", "销售毛利率(%)"],
     }
     values = {"报告期": str(period)}
     for key, names in aliases.items():
