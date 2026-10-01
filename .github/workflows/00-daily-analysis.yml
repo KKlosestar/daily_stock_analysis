@@ -4,7 +4,6 @@ on:
   # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
   schedule:
     - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
-    - cron: '5 10 7 10 *'     # 一次性：2026-10-07 北京18:05 强制复盘（为10-08开盘准备，休市force_run）
   
   # 手动触发
   workflow_dispatch:
@@ -388,13 +387,13 @@ jobs:
 
           # 通知路由策略（留空时保持全部已配置渠道）
           NOTIFICATION_REPORT_CHANNELS: ${{ vars.NOTIFICATION_REPORT_CHANNELS || secrets.NOTIFICATION_REPORT_CHANNELS }}
-          NOTIFICATION_ALERT_CHANNELS: ${{ vars.NOTIFICATION_ALERT_CHANNELS || secrets.NOTIFICATION_ALERT_CHANNELS }}
+          NOTIFICATION_ALERT_CHANNELS: ${{ secrets.NOTIFICATION_ALERT_CHANNELS || secrets.NOTIFICATION_ALERT_CHANNELS }}
           NOTIFICATION_SYSTEM_ERROR_CHANNELS: ${{ secrets.NOTIFICATION_SYSTEM_ERROR_CHANNELS }}
           NOTIFICATION_DEDUP_TTL_SECONDS: ${{ vars.NOTIFICATION_DEDUP_TTL_SECONDS || secrets.NOTIFICATION_DEDUP_TTL_SECONDS || '0' }}
-          NOTIFICATION_COOLDOWN_SECONDS: ${{ vars.NOTIFICATION_COOLDOWN_SECONDS || secrets.NOTIFICATION_COOLDOWN_SECONDS || '0' }}
-          NOTIFICATION_QUIET_HOURS: ${{ vars.NOTIFICATION_QUIET_HOURS }}
+          NOTIFICATION_COOLDOWN_SECONDS: ${{ secrets.NOTIFICATION_COOLDOWN_SECONDS || secrets.NOTIFICATION_COOLDOWN_SECONDS || '0' }}
+          NOTIFICATION_QUIET_HOURS: ${{ secrets.NOTIFICATION_QUIET_HOURS }}
           NOTIFICATION_TIMEZONE: ${{ vars.NOTIFICATION_TIMEZONE || secrets.NOTIFICATION_TIMEZONE }}
-          NOTIFICATION_MIN_SEVERITY: ${{ vars.NOTIFICATION_MIN_SEVERITY }}
+          NOTIFICATION_MIN_SEVERITY: ${{ secrets.NOTIFICATION_MIN_SEVERITY }}
           NOTIFICATION_DAILY_DIGEST_ENABLED: ${{ vars.NOTIFICATION_DAILY_DIGEST_ENABLED || secrets.NOTIFICATION_DAILY_DIGEST_ENABLED || 'false' }}
 
           # ==========================================
@@ -521,9 +520,8 @@ jobs:
           echo ""
           
           # 构建命令行参数
-          SCHEDULE_CRON="${{ github.event.schedule }}"
           FORCE_RUN_ARG=""
-          if [ "${{ github.event.inputs.force_run }}" = "true" ] || [ "$SCHEDULE_CRON" = "5 10 7 10 *" ]; then
+          if [ "${{ github.event.inputs.force_run }}" = "true" ]; then
             FORCE_RUN_ARG="--force-run"
             echo "⚡ 已启用强制运行模式（跳过交易日检查）"
           fi
