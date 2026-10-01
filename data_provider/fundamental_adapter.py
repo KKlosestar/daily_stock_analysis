@@ -512,8 +512,7 @@ class AkshareFundamentalAdapter:
             if name_col and flow_col:
                 work_df = sector_df[[name_col, flow_col]].copy()
                 work_df[flow_col] = pd.to_numeric(work_df[flow_col], errors="coerce")
-                work_df = work_df.dropna(subset=[flow_col])
-                work_df = work_df[work_df[flow_col].map(math.isfinite)]
+                work_df = work_df.loc[work_df[flow_col].between(-math.inf, math.inf, inclusive="neither")]
                 top_df = work_df.nlargest(top_n, flow_col)
                 bottom_df = work_df.nsmallest(top_n, flow_col)
                 result["sector_rankings"] = {

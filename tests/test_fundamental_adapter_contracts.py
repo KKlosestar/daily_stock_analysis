@@ -70,6 +70,48 @@ def test_capital_flow_failure_keeps_sector_amounts_without_wrong_fallback(monkey
     assert result["errors"] == ["stock_individual_fund_flow:ConnectionError"]
 
 
+@pytest.mark.parametrize("amounts", [
+    ["-", None, float("nan")],
+    [float("inf"), float("-inf"), pd.NA],
+])
+def test_capital_flow_keeps_stock_amount_when_sector_amounts_are_all_missing(monkeypatch, amounts):
+    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(
+        stock_individual_fund_flow=lambda **kwargs: pd.DataFrame({
+            "日期": ["2026-09-30"], "主力净流入-净额": [20],
+        }),
+        stock_sector_fund_flow_rank=lambda **kwargs: pd.DataFrame({
+            "名称": ["行业A", "行业B", "行业C"],
+            "今日主力净流入-净额": amounts,
+        }),
+    ))
+
+    result = AkshareFundamentalAdapter().get_capital_flow("600519")
+
+    assert result["stock_flow"] == {"main_net_inflow": 20, "inflow_5d": None, "inflow_10d": None}
+    assert result["sector_rankings"] == {"top": [], "bottom": []}
+    assert result["status"] == "partial"
+    assert "capital_stock:stock_individual_fund_flow" in result["source_chain"]
+    assert result["errors"] == []
+
+
+def test_capital_flow_sector_rankings_keep_only_finite_amounts(monkeypatch):
+    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(
+        stock_sector_fund_flow_rank=lambda: pd.DataFrame({
+            "名称": ["无穷流入", "无穷流出", "缺失", "零流入", "净流出"],
+            "今日主力净流入-净额": [float("inf"), float("-inf"), "-", 0, -20],
+            "今日主力净流入-净占比": [99, 98, 97, 96, 95],
+        }),
+    ))
+
+    result = AkshareFundamentalAdapter().get_capital_flow("600519")
+
+    zero = {"name": "零流入", "net_inflow": 0}
+    negative = {"name": "净流出", "net_inflow": -20}
+    assert result["sector_rankings"] == {"top": [zero, negative], "bottom": [negative, zero]}
+    assert result["stock_flow"] == {}
+    assert result["status"] == "partial"
+
+
 @pytest.mark.parametrize("dates", [["invalid"], [None]])
 def test_capital_flow_without_valid_date_is_unavailable(monkeypatch, dates):
     monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(
@@ -98,6 +140,64 @@ def test_capital_flow_real_akshare_request_uses_shenzhen_security(monkeypatch):
     result = AkshareFundamentalAdapter().get_capital_flow("000001")
     assert calls == ["0.000001"]
     assert result["stock_flow"]["main_net_inflow"] == -20
+
+
+def test_capital_flow_real_akshare_missing_sector_amounts_reach_manager_and_agent(monkeypatch):
+    import akshare as ak
+    import requests
+
+    from data_provider.base import DataFetcherManager
+    from src.agent.tools.data_tools import _handle_get_capital_flow
+    from src.analyzer import _capital_flow_bias_with_status
+
+    calls = []
+
+    def get(url, params, **kwargs):
+        if "secid" in params:
+            calls.append(("stock", params["secid"]))
+            data = {"klines": ["2026-09-30,20,0,0,0,0,2,0,0,0,0,12,0,0,0"]}
+        else:
+            calls.append(("sector", params["fs"]))
+            # Eastmoney's sector response, including placeholder numeric fields.
+            row = {
+                "f2": 100, "f3": 1, "f12": "BK0001",
+                "f14": "行业A", "f62": "-", "f66": "-", "f69": "-",
+                "f72": "-", "f75": "-", "f78": "-", "f81": "-",
+                "f84": "-", "f87": "-", "f124": 0, "f184": "-",
+                "f204": "股票A", "f205": "600519", "f206": 1,
+            }
+            data = {"total": 1, "diff": [row]}
+        return SimpleNamespace(json=lambda: {"data": data})
+
+    # Keep both AkShare implementations and the adapter/manager execution real;
+    # replace only their HTTP boundary and runtime configuration.
+    monkeypatch.setattr(requests, "get", get)
+    sector_df = ak.stock_sector_fund_flow_rank()
+    assert sector_df["今日主力净流入-净额"].isna().all()
+    calls.clear()
+    cfg = SimpleNamespace(fundamental_fetch_timeout_seconds=2.0, fundamental_retry_max=1)
+    monkeypatch.setattr("src.config.get_config", lambda: cfg)
+    manager = DataFetcherManager(fetchers=[])
+    monkeypatch.setattr("src.agent.tools.data_tools._get_fetcher_manager", lambda: manager)
+
+    context = manager.get_capital_flow_context("600519")
+
+    assert context["status"] == "ok"
+    assert context["coverage"] == {"status": "ok"}
+    assert context["data"]["stock_flow"] == {"main_net_inflow": 20, "inflow_5d": None, "inflow_10d": None}
+    assert context["data"]["sector_rankings"] == {"top": [], "bottom": []}
+    assert context["errors"] == []
+    assert {entry["provider"] for entry in context["source_chain"]} == {
+        "capital_stock:stock_individual_fund_flow", "capital_sector:stock_sector_fund_flow_rank",
+    }
+    assert _capital_flow_bias_with_status({"capital_flow": context}) == ("inflow", "ok")
+
+    tool_result = _handle_get_capital_flow("600519")
+    assert tool_result["status"] == "ok"
+    assert tool_result["main_net_inflow"] == 20
+    assert tool_result["errors"] == []
+    assert [value for kind, value in calls if kind == "stock"] == ["1.600519", "1.600519"]
+    assert any(kind == "sector" for kind, _ in calls)
 
 
 @pytest.mark.parametrize("now, expected", [
