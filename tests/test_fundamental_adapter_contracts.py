@@ -13,6 +13,93 @@ from data_provider.fundamental_adapter import (
 )
 
 
+@pytest.mark.parametrize("code, market", [("600519", "sh"), ("000001", "sz"), ("bj920001", "bj")])
+def test_capital_flow_uses_market_and_latest_amount(monkeypatch, code, market):
+    calls = []
+
+    def individual(stock, market):
+        calls.append((stock, market))
+        return pd.DataFrame({
+            "日期": ["2026-09-28", "invalid", "2026-09-30", "2026-09-29"],
+            "主力净流入-净占比": [1, 2, 3, 4],
+            "主力净流入-净额": [10, 999, -20, 30],
+        })
+
+    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(stock_individual_fund_flow=individual))
+    result = AkshareFundamentalAdapter().get_capital_flow(code)
+    assert calls == [(code.removeprefix("bj"), market)]
+    assert result["stock_flow"] == {"main_net_inflow": -20, "inflow_5d": None, "inflow_10d": None}
+
+
+@pytest.mark.parametrize("value", [0, -123, None, float("nan"), float("inf")])
+def test_capital_flow_keeps_only_finite_amounts(monkeypatch, value):
+    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(
+        stock_individual_fund_flow=lambda **kwargs: pd.DataFrame({"日期": ["2026-09-30"], "主力净流入-净额": [value]}),
+    ))
+    result = AkshareFundamentalAdapter().get_capital_flow("000001")
+    if value is not None and value in (0, -123):
+        assert result["stock_flow"]["main_net_inflow"] == value
+    else:
+        assert result["stock_flow"] == {}
+        assert result["source_chain"] == []
+
+
+def test_capital_flow_failure_keeps_sector_amounts_without_wrong_fallback(monkeypatch):
+    wrong_calls = []
+
+    def individual(stock, market):
+        raise ConnectionError("unavailable")
+
+    def wrong(**kwargs):
+        wrong_calls.append(kwargs)
+        return pd.DataFrame({"名称": ["unrelated"], "主力净流入-净占比": [99]})
+
+    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(
+        stock_individual_fund_flow=individual, stock_main_fund_flow=wrong,
+        stock_sector_fund_flow_summary=wrong,
+        stock_sector_fund_flow_rank=lambda **kwargs: pd.DataFrame({
+            "名称": ["行业A", "行业B"], "今日主力净流入-净占比": [99, 1],
+            "今日主力净流入-净额": [-100, 200],
+        }),
+    ))
+    result = AkshareFundamentalAdapter().get_capital_flow("000001", top_n=1)
+    assert wrong_calls == []
+    assert result["stock_flow"] == {}
+    assert result["sector_rankings"]["top"] == [{"name": "行业B", "net_inflow": 200}]
+    assert result["status"] == "partial"
+    assert result["errors"] == ["stock_individual_fund_flow:ConnectionError"]
+
+
+@pytest.mark.parametrize("dates", [["invalid"], [None]])
+def test_capital_flow_without_valid_date_is_unavailable(monkeypatch, dates):
+    monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(
+        stock_individual_fund_flow=lambda **kwargs: pd.DataFrame({"日期": dates, "主力净流入-净额": [100]}),
+    ))
+    result = AkshareFundamentalAdapter().get_capital_flow("000001")
+    assert result["stock_flow"] == {}
+    assert result["status"] == "not_supported"
+
+
+def test_capital_flow_real_akshare_request_uses_shenzhen_security(monkeypatch):
+    import akshare as ak
+    import requests
+
+    calls = []
+
+    def get(url, params, **kwargs):
+        calls.append(params["secid"])
+        return SimpleNamespace(json=lambda: {"data": {"klines": [
+            "2026-09-28,10,0,0,0,0,1,0,0,0,0,12,0,0,0",
+            "2026-09-30,-20,0,0,0,0,-2,0,0,0,0,12,0,0,0",
+        ]}})
+
+    monkeypatch.setattr(requests, "get", get)
+    monkeypatch.setattr(ak, "stock_sector_fund_flow_rank", lambda: pd.DataFrame())
+    result = AkshareFundamentalAdapter().get_capital_flow("000001")
+    assert calls == ["0.000001"]
+    assert result["stock_flow"]["main_net_inflow"] == -20
+
+
 @pytest.mark.parametrize("now, expected", [
     (datetime(2026, 1, 1), ["20251231", "20250930"]),
     (datetime(2024, 3, 31), ["20231231", "20230930"]),
