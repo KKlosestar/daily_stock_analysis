@@ -409,6 +409,116 @@ class BaseSearchProvider(ABC):
         return self._execute_search(query, max_results=max_results, days=days)
 
 
+class EastMoneyNewsProvider(BaseSearchProvider):
+    """
+    东方财富个股新闻（免费，无需 API Key）
+
+    特点：
+    - A股个股新闻/公告直连东财公开接口，免费无 key、无额度限制
+    - 作为付费搜索引擎失败时的兜底（Bocha 余额不足、Tavily 未配置等）
+    - 仅适用于 A 股（query 中需含 6 位股票代码）
+    """
+
+    def __init__(self, api_keys: Optional[List[str]] = None):
+        super().__init__(api_keys or [], "EastMoneyNews")
+
+    @property
+    def is_available(self) -> bool:
+        # 免费公开接口，无需 key，始终可用
+        return True
+
+    def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
+        """重写 search：跳过 API Key 检查（免费接口无 key）。"""
+        start_time = time.time()
+        try:
+            response = self._do_search(query, "", max_results, days=days)
+        except Exception as e:
+            response = SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=str(e),
+            )
+        response.search_time = time.time() - start_time
+        if response.success:
+            logger.info(
+                "[%s] 搜索 '%s' 成功，返回 %d 条结果，耗时 %.2fs",
+                self.name, query, len(response.results), response.search_time,
+            )
+        else:
+            logger.warning("[%s] 搜索 '%s' 失败: %s", self.name, query, response.error_message)
+        return response
+
+    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
+        """执行东财个股新闻抓取。"""
+        try:
+            import re
+
+            import akshare as ak
+        except ImportError:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="akshare 未安装",
+            )
+
+        m = re.search(r"(\d{6})", query)
+        if not m:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="query 中未找到 A 股 6 位代码，跳过东财新闻",
+            )
+        code = m.group(1)
+        try:
+            df = ak.stock_news_em(symbol=code)
+        except Exception as e:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=f"stock_news_em 失败: {e}",
+            )
+        if df is None or df.empty:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message="东财新闻无数据",
+            )
+
+        results: List[SearchResult] = []
+        for _, row in df.head(max_results).iterrows():
+            title = str(row.get("新闻标题", "")).strip()
+            content = str(row.get("新闻内容", "")).strip()
+            url = str(row.get("新闻链接", "")).strip()
+            source = str(row.get("文章来源", "东方财富")).strip()
+            raw_date = str(row.get("发布时间", "")).strip()
+            published_date = raw_date[:10] if raw_date and raw_date != "NaT" else None
+            results.append(
+                SearchResult(
+                    title=title or "（无标题）",
+                    snippet=content[:120] if content else "",
+                    url=url,
+                    source=source or "东方财富",
+                    published_date=published_date,
+                )
+            )
+        return SearchResponse(
+            query=query,
+            results=results,
+            provider=self.name,
+            success=True,
+        )
+
+
 class TavilySearchProvider(BaseSearchProvider):
     """
     Tavily 搜索引擎
@@ -2493,7 +2603,13 @@ class SearchService:
         if anspire_keys:
             self._providers.insert(0, AnspireSearchProvider(anspire_keys))
             logger.info(f"已配置 Anspire Search 搜索，共 {len(anspire_keys)} 个 API Key")
-            
+
+        # 8. 东方财富个股新闻（免费兜底，无 key；付费引擎失败时仍可返回 A 股个股新闻）
+        eastmoney_provider = EastMoneyNewsProvider()
+        if eastmoney_provider.is_available:
+            self._providers.append(eastmoney_provider)
+            logger.info("已启用 EastMoneyNews 免费个股新闻源（兜底）")
+
         if not self._providers:
             logger.warning("未配置任何搜索能力，新闻搜索功能将不可用")
 

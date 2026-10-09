@@ -11,10 +11,14 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+
+# 免费接口偶发断连/超时，每个候选接口最多重试次数
+_CANDIDATE_RETRY_TIMES = 3
 
 logger = logging.getLogger(__name__)
 
@@ -354,19 +358,35 @@ class AkshareFundamentalAdapter:
             fn = getattr(ak, func_name, None)
             if fn is None:
                 continue
-            try:
-                df = fn(**kwargs)
-                if isinstance(df, pd.Series):
-                    df = df.to_frame().T
-                if isinstance(df, pd.DataFrame) and not df.empty and stock_code is not None:
-                    # Market-wide endpoints must contain the requested stock.
-                    # A nonempty table for other stocks must not stop fallback.
-                    df = _filter_rows_by_code(df, stock_code, require_code=True)
-                if isinstance(df, pd.DataFrame) and not df.empty:
-                    return df, func_name, errors
-            except Exception as exc:
-                errors.append(f"{func_name}:{type(exc).__name__}")
-                continue
+            # 对每个候选接口尝试最多 RETRY_TIMES 次（免费接口偶发断连/超时）
+            last_exc: Optional[Exception] = None
+            for attempt in range(1, _CANDIDATE_RETRY_TIMES + 1):
+                try:
+                    df = fn(**kwargs)
+                    if isinstance(df, pd.Series):
+                        df = df.to_frame().T
+                    if isinstance(df, pd.DataFrame) and not df.empty and stock_code is not None:
+                        # Market-wide endpoints must contain the requested stock.
+                        # A nonempty table for other stocks must not stop fallback.
+                        df = _filter_rows_by_code(df, stock_code, require_code=True)
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        if attempt > 1:
+                            logger.warning(
+                                "[Fundamental] %s(%s) 第 %d 次重试成功",
+                                func_name, kwargs, attempt,
+                            )
+                        return df, func_name, errors
+                    last_exc = ValueError(f"{func_name}: empty result")
+                except Exception as exc:
+                    last_exc = exc
+                    errors.append(f"{func_name}:{type(exc).__name__}:{str(exc)[:80]}")
+                    if attempt < _CANDIDATE_RETRY_TIMES:
+                        time.sleep(0.8 * attempt)
+            if last_exc is not None:
+                logger.warning(
+                    "[Fundamental] %s(%s) 尝试 %d 次仍失败: %s",
+                    func_name, kwargs, _CANDIDATE_RETRY_TIMES, str(last_exc)[:120],
+                )
         return None, None, errors
 
     def get_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
