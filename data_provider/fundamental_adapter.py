@@ -463,6 +463,13 @@ class AkshareFundamentalAdapter:
                     result["growth"] = growth_payload
                 if result["growth"] or result["earnings"].get("financial_report"):
                     result["source_chain"].append(f"growth:{fin_source}")
+                # 财报主源（新浪财务摘要）成功即提前返回：跳过业绩预告/快报/分红/
+                # 机构持股/资金流等补充候选。这些候选在云环境网络下逐个超时会把
+                # bundle 整体拖到 100s+，超出 fetch 预算导致整个 bundle 结果被丢弃，
+                # 而核心财报（营收/归母净利/毛利率）才是报告最需要的字段。
+                if result["earnings"].get("financial_report") or result["growth"]:
+                    result["status"] = "partial"
+                    return result
 
         # Earnings forecast
         forecast_df, forecast_source, forecast_errors = self._call_df_candidates([
