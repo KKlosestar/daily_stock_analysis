@@ -418,16 +418,7 @@ class AkshareFundamentalAdapter:
         ])
         result["errors"].extend(fin_errors)
         if fin_df is not None:
-            logger.warning(
-                "[Fundamental] 财务指标数据源=%s 形状=%s 列名=%s",
-                fin_source, getattr(fin_df, "shape", None),
-                list(fin_df.columns)[:10] if hasattr(fin_df, "columns") else None,
-            )
             row = _financial_abstract_row(fin_df) if "指标" in fin_df else _extract_latest_row(fin_df, stock_code)
-            logger.warning(
-                "[Fundamental] 财务指标 row 提取结果: %s",
-                None if row is None else {k: row.get(k) for k in list(row.index)[:12]},
-            )
             if row is not None:
                 revenue_yoy = _safe_float(_pick_by_keywords(row, ["营业收入同比", "营收同比", "收入同比", "同比增长"]))
                 profit_yoy = _safe_float(_pick_by_keywords(row, ["净利润同比", "净利同比", "归母净利润同比"]))
