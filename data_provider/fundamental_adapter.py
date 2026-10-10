@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 # 免费接口偶发断连/超时，每个候选接口最多重试次数
-_CANDIDATE_RETRY_TIMES = 3
+_CANDIDATE_RETRY_TIMES = 1
 
 logger = logging.getLogger(__name__)
 
