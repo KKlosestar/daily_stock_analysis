@@ -4239,6 +4239,28 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                 result.report_language = report_language
                 normalize_chip_structure_availability(result, context.get("chip"))
 
+                # 文本 fallback 的解析结果若连核心契约都不满足（success=False），
+                # 走完整性重试路径强制重新生成合法 JSON，避免偶发截断导致整只股票
+                # 被判定失败而丢失（Issue: 卫宁健康 300253 曾因此未进报告）。
+                if not getattr(result, "success", True) and retry_count < max_retries:
+                    current_prompt = self._build_integrity_retry_prompt(
+                        prompt,
+                        response_text,
+                        ["analysis JSON"],
+                        report_language=report_language,
+                    )
+                    retry_count += 1
+                    logger.warning(
+                        "[LLM JSON] %s(%s) 解析失败，第 %d 次强制 JSON 重试",
+                        name, code, retry_count,
+                    )
+                    retry_progress = min(99, 92 + retry_count * 2)
+                    _emit_progress(
+                        retry_progress,
+                        f"{name}：JSON 解析失败，正在重试（{retry_count}/{max_retries}）",
+                    )
+                    continue
+
                 # 内容完整性校验（可选）
                 if not config.report_integrity_enabled:
                     break
@@ -5652,8 +5674,8 @@ Output the complete Decision Dashboard in JSON format."""
                 ko='결과가 부정확할 수 있습니다. 다른 정보와 교차 확인하세요.',
             ),
             raw_response=response_text,
-            success=False,
-            error_message='LLM response is not valid JSON; analysis result will not be persisted',
+            success=True,
+            error_message='LLM response is not valid JSON; used text-mode fallback (low confidence)',
             report_language=report_language,
         )
         return populate_decision_action_fields(result, align_with_score=False)
