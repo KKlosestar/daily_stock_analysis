@@ -840,13 +840,31 @@ class StockAnalysisPipeline:
                     model=getattr(self.config, "litellm_model", None),
                     call_type="analysis",
                 )
-                result = self.analyzer.analyze(
-                    enhanced_context,
-                    news_context=news_context,
-                    progress_callback=self._emit_progress,
-                    stream_progress_callback=_on_llm_stream,
-                    analysis_context_pack_summary=analysis_context_pack_summary,
-                )
+                try:
+                    result = self.analyzer.analyze(
+                        enhanced_context,
+                        news_context=news_context,
+                        progress_callback=self._emit_progress,
+                        stream_progress_callback=_on_llm_stream,
+                        analysis_context_pack_summary=analysis_context_pack_summary,
+                    )
+                except Exception as exc:
+                    # 偶发瞬时故障（如 LLM 空响应/上游超时）自动重试一次，
+                    # 避免整只股票因一次瞬时失败被丢弃（Issue: 300253 卫宁健康）。
+                    logger.warning(
+                        f"{stock_name}({code}) 首次分析失败"
+                        f"（{type(exc).__name__}），自动重试第 2 次: {exc}"
+                    )
+                    self._emit_progress(
+                        66, f"{stock_name}：分析失败，正在自动重试（2/2）"
+                    )
+                    result = self.analyzer.analyze(
+                        enhanced_context,
+                        news_context=news_context,
+                        progress_callback=self._emit_progress,
+                        stream_progress_callback=_on_llm_stream,
+                        analysis_context_pack_summary=analysis_context_pack_summary,
+                    )
                 llm_duration_ms = int((time.monotonic() - llm_started_at) * 1000)
                 if result is not None:
                     # 交给展示层区分「未配置渠道」「检索零命中」和「正常命中」。
