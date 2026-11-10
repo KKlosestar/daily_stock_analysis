@@ -905,6 +905,45 @@ class StockAnalysisPipeline:
                 )
                 raise
 
+            # Step 7.4: LLM 空响应兜底 —— analyzer.analyze 内部已捕获异常并返回
+            # success=False 的结果，外层异常重试不会触发。这里先补试一次，
+            # 仍失败则生成降级结果，保证股票不因 LLM 故障从报告中消失
+            # （Issue: 300012 华测检测 2026-11-10 连续两次空响应被剔除）。
+            if result is not None and not getattr(result, "success", True):
+                err_text = str(getattr(result, "error_message", "") or "")
+                logger.warning(
+                    f"{stock_name}({code}) 分析返回失败（{err_text[:100]}），补试第 2 次"
+                )
+                self._emit_progress(66, f"{stock_name}：分析失败，正在补试（2/2）")
+                try:
+                    retry_result = self.analyzer.analyze(
+                        enhanced_context,
+                        news_context=news_context,
+                        progress_callback=self._emit_progress,
+                        stream_progress_callback=_on_llm_stream,
+                        analysis_context_pack_summary=analysis_context_pack_summary,
+                    )
+                    if retry_result is not None and getattr(retry_result, "success", False):
+                        result = retry_result
+                        logger.info(f"{stock_name}({code}) 补试成功")
+                    elif retry_result is not None:
+                        result = retry_result
+                except Exception as retry_exc:
+                    logger.warning(f"{stock_name}({code}) 补试异常: {retry_exc}")
+
+                if result is not None and not getattr(result, "success", True):
+                    logger.warning(
+                        f"{stock_name}({code}) 分析最终失败，启用降级结果保留到报告"
+                    )
+                    result = self._build_degraded_analysis_result(
+                        code=code,
+                        stock_name=stock_name,
+                        trend_result=trend_result,
+                        realtime_quote=realtime_quote,
+                        error_message=str(getattr(result, "error_message", "") or ""),
+                        report_language=report_language,
+                    )
+
             # Step 7.5: 填充分析时的价格信息到 result
             if result:
                 self._emit_progress(94, f"{stock_name}：正在校验并整理分析结果")
@@ -1017,6 +1056,87 @@ class StockAnalysisPipeline:
             logger.exception(f"{stock_name}({code}) 详细错误信息:")
             return None
     
+    def _build_degraded_analysis_result(
+        self,
+        code: str,
+        stock_name: str,
+        trend_result,
+        realtime_quote,
+        error_message: str,
+        report_language: str = "zh",
+    ) -> AnalysisResult:
+        """LLM 彻底失败时构造降级结果，保证该股票仍出现在报告中。
+
+        只填入真实计算得到的系统技术指标，AI 文本结论一律标注缺失原因，
+        不作任何推测性补充（不编造）。
+        """
+        reason = (error_message or "未知原因")[:120]
+        score = 50
+        trend_status = "数据缺失"
+        volume_status = "数据缺失"
+        buy_signal = "观望"
+        ma_alignment = "数据缺失"
+        signal_reasons = ""
+        risk_factors = ""
+        if trend_result is not None:
+            try:
+                score = int(getattr(trend_result, "signal_score", 50) or 50)
+                trend_status = getattr(getattr(trend_result, "trend_status", None), "value", "数据缺失")
+                volume_status = getattr(getattr(trend_result, "volume_status", None), "value", "数据缺失")
+                buy_signal = getattr(getattr(trend_result, "buy_signal", None), "value", "观望")
+                ma_alignment = getattr(trend_result, "ma_alignment", "") or "数据缺失"
+                signal_reasons = "；".join(getattr(trend_result, "signal_reasons", []) or [])
+                risk_factors = "；".join(getattr(trend_result, "risk_factors", []) or [])
+            except Exception:
+                pass
+
+        trend_map = {"多头排列": "看多", "空头排列": "看空", "震荡整理": "震荡"}
+        trend = trend_map.get(trend_status, "震荡")
+        price_text = ""
+        try:
+            if realtime_quote is not None:
+                price = getattr(realtime_quote, "current_price", None)
+                change = getattr(realtime_quote, "change_pct", None)
+                if price is not None:
+                    price_text = f"现价 {price} 元"
+                if change is not None:
+                    price_text += f"，涨跌幅 {change}%"
+        except Exception:
+            pass
+
+        summary = (
+            f"⚠️ AI 文本分析未完成（原因：{reason}）。"
+            f"本段仅保留系统技术指标的真实计算结果：趋势状态 {trend_status}，"
+            f"系统评分 {score}，量能 {volume_status}，信号 {buy_signal}。"
+            "消息面与基本面结论缺失，请勿仅据本段做决策。"
+        )
+        risk_warning = (
+            "本次 LLM 分析失败（空响应/上游故障），报告已保留技术面原始数据并标注失败原因；"
+            "新闻面与基本面分析缺失，建议手动复核或明日再看。"
+        )
+        return AnalysisResult(
+            code=str(code),
+            name=stock_name,
+            sentiment_score=score,
+            trend_prediction=localize_trend_prediction(trend, report_language),
+            operation_advice=localize_operation_advice(buy_signal if buy_signal else "观望", report_language),
+            confidence_level=localize_confidence_level("低", report_language),
+            trend_analysis=f"趋势状态：{trend_status}；均线排列：{ma_alignment}。{price_text}",
+            technical_analysis=(
+                f"趋势状态 {trend_status}，系统评分 {score}/100，量能状态 {volume_status}。"
+                + (f" 买入理由：{signal_reasons}。" if signal_reasons else "")
+                + (f" 风险因素：{risk_factors}。" if risk_factors else "")
+            ),
+            ma_analysis=f"均线排列：{ma_alignment}",
+            volume_analysis=f"量能状态：{volume_status}",
+            analysis_summary=summary,
+            risk_warning=risk_warning,
+            key_points="AI 分析缺失，仅有系统技术指标；消息面/基本面数据未产出。",
+            success=True,
+            error_message=f"degraded_report: {reason}",
+            report_language=report_language,
+        )
+
     def _enhance_context(
         self,
         context: Dict[str, Any],
